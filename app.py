@@ -159,11 +159,13 @@ def index():
     return render_template(
         "index.html",
         radio_name=RADIO_NAME,
-        stream_url="/radio-stream",
+        stream_url=STREAM_URL,
+        spectrum_stream_url="/radio-spectrum-stream",
     )
 
 
 @app.route("/radio-stream")
+@app.route("/radio-spectrum-stream")
 def radio_stream():
     """Proxy de áudio do mesmo domínio para permitir Web Audio/AnalyserNode."""
     try:
@@ -287,8 +289,10 @@ def health():
         "platform": "vercel" if os.getenv("VERCEL") else "local",
         "radio": RADIO_NAME,
         "stream": STREAM_URL,
-        "player_source": "/radio-stream",
+        "player_source": "direct-official-stream",
+        "spectrum_source": "/radio-spectrum-stream",
         "real_spectrum": True,
+        "automatic_spectrum_reconnect": True,
         "ffmpeg_available": ffmpeg_available,
         "ffmpeg_path": binary,
         "capture_seconds": CAPTURE_SECONDS,

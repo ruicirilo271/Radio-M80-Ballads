@@ -1,48 +1,31 @@
-# M80 Ballads — Super Deus Final para Vercel
+# M80 Ballads — Super Deus Estável (Vercel)
 
-## Funcionalidades
+Esta versão resolve o desligamento ao fim de alguns minutos na Vercel.
 
-- Stream M80 Ballads através de `/radio-stream`.
-- Equalizador real com Web Audio API e `AnalyserNode`.
-- Identificação Shazam usando uma amostra temporária em `/tmp`.
-- Capas Shazam/iTunes.
-- Histórico das últimas 10 músicas no `localStorage`.
-- Top 10 guardado no navegador.
-- Player fino fixo no rodapé.
-- Página `/health` e teste `/api/stream-check`.
+## Arquitetura
 
-## Estrutura correta no GitHub
+- O áudio que o utilizador ouve toca diretamente do stream oficial da M80.
+- O spectrum usa um segundo áudio silencioso através de `/radio-spectrum-stream`.
+- Quando a Vercel termina a Function de streaming, apenas o spectrum é renovado.
+- A rádio principal continua a tocar sem interrupção.
+- O áudio principal também tem recuperação automática para falhas reais do servidor.
+- Identificação Shazam, capas, histórico e Top 10 continuam ativos.
+
+## Publicação
+
+Coloca na raiz do repositório:
 
 ```text
 app.py
 requirements.txt
 README.md
 templates/
-  index.html
 static/
-  style.css
-  script.js
-  default_cover.svg
 ```
 
-Não incluas `vercel.json`. A publicação que funcionou utilizou a deteção automática do Flask com `app.py` na raiz.
+Não uses `vercel.json` neste projeto, porque a deteção automática do `app.py` já funcionou no deploy anterior.
 
-## Publicar na Vercel
-
-1. Coloca os ficheiros diretamente na raiz do repositório GitHub.
-2. Confirma que o ficheiro se chama exatamente `app.py`.
-3. Na Vercel, deixa Framework Preset em `Other` ou deteção automática.
-4. Não definas Build Command, Output Directory ou Install Command.
-5. Deixa Root Directory vazio quando `app.py` está na raiz.
-6. Faz o deploy sem reutilizar cache antigo.
-
-## Testes
-
-- `/health`
-- `/api/stream-check`
-- Liga a rádio e confirma que `Spectrum real: frequências ativas` aparece.
-
-## Execução local
+## Teste local
 
 ```powershell
 python -m venv venv
@@ -53,6 +36,7 @@ python app.py
 
 Abre `http://127.0.0.1:5000`.
 
-## Nota sobre Vercel
+## Diagnóstico
 
-O equalizador real depende de a rota `/radio-stream` permanecer aberta enquanto a rádio toca. Em ambientes serverless, a plataforma pode terminar ligações muito longas dependendo do plano, região ou configuração. Se isso acontecer, volta a carregar no botão para restabelecer a ligação.
+- `/health`
+- `/api/stream-check`

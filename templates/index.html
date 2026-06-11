@@ -111,9 +111,16 @@
         <div class="progress-glow"><span id="progressGlow"></span></div>
     </footer>
 
-    <audio id="radioAudio" preload="none">
-        <source src="{{ stream_url }}" type="audio/aac">
-    </audio>
+    <!-- Áudio principal: toca diretamente do servidor oficial e não depende da duração da Function. -->
+    <audio id="radioAudio"
+           preload="none"
+           data-stream-url="{{ stream_url }}"></audio>
+
+    <!-- Áudio silencioso: passa pelo mesmo domínio apenas para alimentar o AnalyserNode. -->
+    <audio id="spectrumAudio"
+           preload="none"
+           crossorigin="anonymous"
+           data-stream-url="{{ spectrum_stream_url }}"></audio>
 
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>

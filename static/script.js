@@ -1,4 +1,5 @@
 const audio = document.getElementById("radioAudio");
+const spectrumAudio = document.getElementById("spectrumAudio");
 const mainPlayButton = document.getElementById("mainPlayButton");
 const dockPlayButton = document.getElementById("dockPlayButton");
 const mainPlayIcon = document.getElementById("mainPlayIcon");
@@ -24,21 +25,34 @@ const canvas = document.getElementById("spectrum");
 const ctx = canvas.getContext("2d");
 
 const STORAGE_KEY = "m80_ballads_neon_gold_v3";
-const STREAM_URL = "/radio-stream";
+const DIRECT_STREAM_URL = audio.dataset.streamUrl;
+const SPECTRUM_STREAM_URL = spectrumAudio.dataset.streamUrl || "/radio-spectrum-stream";
 const DEFAULT_COVER = "/static/default_cover.svg";
+const MAIN_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000];
+const SPECTRUM_RECONNECT_MS = 265000; // renova antes do limite normal de 5 minutos da Function
 
 let isPlaying = false;
+let shouldBePlaying = false;
 let identifyTimer = null;
 let animationFrame = null;
 let lastVolume = 0.8;
 let audioContext = null;
 let analyser = null;
 let sourceNode = null;
+let silentGain = null;
 let frequencyData = null;
 let smoothedData = null;
+let spectrumActive = false;
+let mainReconnectTimer = null;
+let mainReconnectAttempt = 0;
+let mainStallTimer = null;
+let spectrumReconnectTimer = null;
+let spectrumRefreshTimer = null;
+let spectrumStarting = false;
 let store = loadStore();
 
 audio.volume = 0.8;
+spectrumAudio.volume = 1;
 
 function loadStore() {
     try {
@@ -91,7 +105,7 @@ function setPlayingUI(playing) {
     if (!playing) spectrumState.textContent = "Spectrum: rádio parada";
 }
 
-async function initializeAudioGraph() {
+function initializeAudioGraph() {
     if (!audioContext) {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) {
@@ -105,45 +119,150 @@ async function initializeAudioGraph() {
         analyser.maxDecibels = -15;
         analyser.smoothingTimeConstant = 0.78;
 
-        sourceNode = audioContext.createMediaElementSource(audio);
+        // O áudio de análise passa pelo proxy do mesmo domínio.
+        // O ganho zero impede que se ouça uma segunda emissão.
+        sourceNode = audioContext.createMediaElementSource(spectrumAudio);
+        silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
         sourceNode.connect(analyser);
-        analyser.connect(audioContext.destination);
+        analyser.connect(silentGain);
+        silentGain.connect(audioContext.destination);
 
         frequencyData = new Uint8Array(analyser.frequencyBinCount);
         smoothedData = new Float32Array(analyser.frequencyBinCount);
     }
 
     if (audioContext.state === "suspended") {
-        await audioContext.resume();
+        audioContext.resume().catch(error => {
+            console.warn("Não foi possível retomar o AudioContext:", error);
+        });
+    }
+}
+
+function clearMainReconnect() {
+    clearTimeout(mainReconnectTimer);
+    clearTimeout(mainStallTimer);
+    mainReconnectTimer = null;
+    mainStallTimer = null;
+}
+
+function cacheBustedSameOrigin(url) {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}session=${Date.now()}`;
+}
+
+async function playMainStream() {
+    if (!shouldBePlaying) return;
+    clearMainReconnect();
+
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    audio.src = DIRECT_STREAM_URL;
+    audio.load();
+    await audio.play();
+}
+
+function scheduleMainReconnect(reason = "ligação interrompida") {
+    if (!shouldBePlaying || mainReconnectTimer) return;
+
+    const index = Math.min(mainReconnectAttempt, MAIN_RECONNECT_DELAYS.length - 1);
+    const delay = MAIN_RECONNECT_DELAYS[index];
+    mainReconnectAttempt += 1;
+    radioStatus.textContent = `A recuperar a rádio… (${reason})`;
+
+    mainReconnectTimer = setTimeout(async () => {
+        mainReconnectTimer = null;
+        if (!shouldBePlaying) return;
+        try {
+            await playMainStream();
+        } catch (error) {
+            console.warn("Reconexão do áudio principal:", error);
+            scheduleMainReconnect("nova tentativa");
+        }
+    }, delay);
+}
+
+function scheduleStallRecovery() {
+    clearTimeout(mainStallTimer);
+    if (!shouldBePlaying) return;
+    mainStallTimer = setTimeout(() => {
+        if (shouldBePlaying && audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+            scheduleMainReconnect("stream sem dados");
+        }
+    }, 12000);
+}
+
+function clearSpectrumTimers() {
+    clearTimeout(spectrumReconnectTimer);
+    clearTimeout(spectrumRefreshTimer);
+    spectrumReconnectTimer = null;
+    spectrumRefreshTimer = null;
+}
+
+async function startSpectrumStream() {
+    if (!shouldBePlaying || spectrumStarting) return;
+    spectrumStarting = true;
+    clearSpectrumTimers();
+
+    try {
+        initializeAudioGraph();
+        spectrumAudio.pause();
+        spectrumAudio.removeAttribute("src");
+        spectrumAudio.load();
+        spectrumAudio.src = cacheBustedSameOrigin(SPECTRUM_STREAM_URL);
+        spectrumAudio.load();
+        await spectrumAudio.play();
+        spectrumActive = true;
+        spectrumState.textContent = "Spectrum real: frequências ativas";
+
+        // A Vercel não permite streaming infinito. Renovamos apenas o áudio
+        // silencioso do spectrum; a rádio principal continua sem interrupção.
+        spectrumRefreshTimer = setTimeout(() => {
+            if (shouldBePlaying) startSpectrumStream();
+        }, SPECTRUM_RECONNECT_MS);
+    } catch (error) {
+        spectrumActive = false;
+        spectrumState.textContent = "Spectrum: a recuperar ligação…";
+        console.warn("Ligação do spectrum:", error);
+        spectrumReconnectTimer = setTimeout(() => {
+            if (shouldBePlaying) startSpectrumStream();
+        }, 3000);
+    } finally {
+        spectrumStarting = false;
     }
 }
 
 async function startRadio() {
     mainPlayButton.disabled = true;
     dockPlayButton.disabled = true;
+    shouldBePlaying = true;
+    mainReconnectAttempt = 0;
     radioStatus.textContent = "A ligar ao stream da M80…";
 
     try {
-        await initializeAudioGraph();
+        // O player audível usa diretamente o stream oficial, portanto não é
+        // desligado quando uma Function da Vercel atinge a duração máxima.
+        initializeAudioGraph();
 
-        audio.pause();
-        audio.src = `${STREAM_URL}?t=${Date.now()}`;
-        audio.load();
-        await audio.play();
-
+        // Os dois play() são iniciados no mesmo clique do utilizador para evitar
+        // que o navegador bloqueie o áudio silencioso usado pelo spectrum.
+        const mainPlayback = playMainStream();
+        const spectrumPlayback = startSpectrumStream();
+        await mainPlayback;
+        spectrumPlayback.catch(error => console.warn("Spectrum inicial:", error));
         setPlayingUI(true);
-        spectrumState.textContent = "Spectrum real: frequências ativas";
 
         clearInterval(identifyTimer);
         setTimeout(() => identifyTrack(true), 8000);
         identifyTimer = setInterval(() => {
-            if (isPlaying) identifyTrack(true);
+            if (shouldBePlaying) identifyTrack(true);
         }, 60000);
     } catch (error) {
         console.error("Erro ao iniciar rádio:", error);
-        setPlayingUI(false);
-        radioStatus.textContent = `Não foi possível iniciar: ${error.message || error}`;
-        spectrumState.textContent = "Spectrum: sem acesso ao áudio";
+        setPlayingUI(true);
+        radioStatus.textContent = `A recuperar a ligação: ${error.message || error}`;
+        scheduleMainReconnect("falha inicial");
     } finally {
         mainPlayButton.disabled = false;
         dockPlayButton.disabled = false;
@@ -151,16 +270,28 @@ async function startRadio() {
 }
 
 function stopRadio() {
+    shouldBePlaying = false;
     clearInterval(identifyTimer);
     identifyTimer = null;
+    clearMainReconnect();
+    clearSpectrumTimers();
+    mainReconnectAttempt = 0;
+    spectrumActive = false;
+
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
+
+    spectrumAudio.pause();
+    spectrumAudio.removeAttribute("src");
+    spectrumAudio.load();
+
     setPlayingUI(false);
+    spectrumState.textContent = "Spectrum: rádio parada";
 }
 
 async function toggleRadio() {
-    if (isPlaying) stopRadio();
+    if (shouldBePlaying) stopRadio();
     else await startRadio();
 }
 
@@ -324,14 +455,14 @@ function drawSpectrum() {
     const gap = width < 500 ? 3 : 4;
     const barWidth = Math.max(2, (width - gap * (bars - 1)) / bars);
 
-    if (analyser && frequencyData && smoothedData && isPlaying) {
+    if (analyser && frequencyData && smoothedData && spectrumActive && shouldBePlaying) {
         analyser.getByteFrequencyData(frequencyData);
     }
 
     for (let i = 0; i < bars; i++) {
         let power = 0.035;
 
-        if (analyser && frequencyData && smoothedData && isPlaying) {
+        if (analyser && frequencyData && smoothedData && spectrumActive && shouldBePlaying) {
             const usableBins = Math.floor(frequencyData.length * 0.72);
             const curvedPosition = Math.pow(i / Math.max(1, bars - 1), 1.65);
             const bin = Math.min(usableBins - 1, Math.floor(curvedPosition * usableBins));
@@ -351,7 +482,7 @@ function drawSpectrum() {
 
         ctx.fillStyle = gradient;
         ctx.shadowColor = "rgba(246, 198, 91, 0.30)";
-        ctx.shadowBlur = isPlaying ? 9 : 0;
+        ctx.shadowBlur = shouldBePlaying ? 9 : 0;
         roundedBar(x, y, barWidth, barHeight, Math.min(5, barWidth / 2));
     }
 
@@ -385,34 +516,84 @@ muteButton.addEventListener("click", () => {
 });
 
 audio.addEventListener("playing", () => {
+    if (!shouldBePlaying) return;
+    clearMainReconnect();
+    mainReconnectAttempt = 0;
     setPlayingUI(true);
-    spectrumState.textContent = "Spectrum real: frequências ativas";
+    radioStatus.textContent = "M80 Ballads ligada";
 });
 
 audio.addEventListener("waiting", () => {
+    if (!shouldBePlaying) return;
     radioStatus.textContent = "A carregar o stream…";
+    scheduleStallRecovery();
 });
 
 audio.addEventListener("stalled", () => {
+    if (!shouldBePlaying) return;
     radioStatus.textContent = "O stream está a recuperar…";
+    scheduleStallRecovery();
+});
+
+audio.addEventListener("ended", () => {
+    if (shouldBePlaying) scheduleMainReconnect("fim inesperado da ligação");
 });
 
 audio.addEventListener("pause", () => {
-    if (isPlaying) setPlayingUI(false);
+    if (!shouldBePlaying) setPlayingUI(false);
 });
 
 audio.addEventListener("error", () => {
-    setPlayingUI(false);
     const code = audio.error?.code;
-    radioStatus.textContent = `Ligação ao stream interrompida${code ? ` (código ${code})` : ""}`;
-    spectrumState.textContent = "Spectrum: sem áudio";
+    if (shouldBePlaying) {
+        scheduleMainReconnect(code ? `erro ${code}` : "erro de ligação");
+    } else {
+        setPlayingUI(false);
+    }
+});
+
+spectrumAudio.addEventListener("playing", () => {
+    spectrumActive = true;
+    spectrumState.textContent = "Spectrum real: frequências ativas";
+});
+
+spectrumAudio.addEventListener("waiting", () => {
+    if (shouldBePlaying) spectrumState.textContent = "Spectrum: a receber áudio…";
+});
+
+spectrumAudio.addEventListener("stalled", () => {
+    if (!shouldBePlaying) return;
+    spectrumActive = false;
+    spectrumState.textContent = "Spectrum: a renovar ligação…";
+    clearTimeout(spectrumReconnectTimer);
+    spectrumReconnectTimer = setTimeout(startSpectrumStream, 2500);
+});
+
+spectrumAudio.addEventListener("ended", () => {
+    if (!shouldBePlaying) return;
+    spectrumActive = false;
+    spectrumState.textContent = "Spectrum: a renovar ligação…";
+    clearTimeout(spectrumReconnectTimer);
+    spectrumReconnectTimer = setTimeout(startSpectrumStream, 1000);
+});
+
+spectrumAudio.addEventListener("error", () => {
+    if (!shouldBePlaying) return;
+    spectrumActive = false;
+    spectrumState.textContent = "Spectrum: a recuperar ligação…";
+    clearTimeout(spectrumReconnectTimer);
+    spectrumReconnectTimer = setTimeout(startSpectrumStream, 3000);
 });
 
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("beforeunload", () => {
+    shouldBePlaying = false;
     clearInterval(identifyTimer);
+    clearMainReconnect();
+    clearSpectrumTimers();
     cancelAnimationFrame(animationFrame);
     audio.pause();
+    spectrumAudio.pause();
 });
 
 resizeCanvas();
