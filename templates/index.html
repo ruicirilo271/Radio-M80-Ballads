@@ -15,16 +15,9 @@
     <header class="topbar">
         <a class="brand" href="/">
             <span class="brand-orbit"></span>
-            <span class="brand-copy">
-                <strong>M80</strong>
-                <small>BALLADS</small>
-            </span>
+            <span class="brand-copy"><strong>M80</strong><small>BALLADS</small></span>
         </a>
-
-        <div class="live-badge">
-            <span class="live-dot"></span>
-            EM DIRETO
-        </div>
+        <div class="live-badge"><span class="live-dot"></span>EM DIRETO</div>
     </header>
 
     <main class="page-shell">
@@ -32,21 +25,14 @@
             <div class="hero-copy">
                 <p class="eyebrow">AS BALADAS QUE MARCARAM GERAÇÕES</p>
                 <h1>Rádio <span>Neon Gold</span></h1>
-                <p class="intro">
-                    Uma experiência premium dedicada às baladas inesquecíveis,
-                    com identificação automática, capas, histórico e Top 10.
-                </p>
+                <p class="intro">Uma experiência premium dedicada às baladas inesquecíveis, com equalizador real, identificação automática, capas, histórico e Top 10.</p>
 
                 <div class="hero-actions">
                     <button id="mainPlayButton" class="primary-button" type="button">
                         <span class="button-icon" id="mainPlayIcon">▶</span>
                         <span id="mainPlayText">Ligar rádio</span>
                     </button>
-
-                    <button id="identifyButton" class="ghost-button" type="button">
-                        <span>✦</span>
-                        Identificar agora
-                    </button>
+                    <button id="identifyButton" class="ghost-button" type="button"><span>✦</span> Identificar agora</button>
                 </div>
 
                 <div class="status-row">
@@ -60,9 +46,7 @@
                     <div class="gold-ring ring-one"></div>
                     <div class="gold-ring ring-two"></div>
                     <div class="cover-frame">
-                        <img id="currentCover"
-                             src="{{ url_for('static', filename='default_cover.svg') }}"
-                             alt="Capa da música">
+                        <img id="currentCover" src="{{ url_for('static', filename='default_cover.svg') }}" alt="Capa da música">
                         <div class="cover-reflection"></div>
                     </div>
                     <div class="vinyl-disc" id="vinylDisc">
@@ -80,75 +64,51 @@
                     <h2 id="currentTitle">M80 Ballads</h2>
                     <p id="currentArtist">Liga a rádio e deixa a música começar</p>
                 </div>
-                <div class="signal-bars" aria-hidden="true">
-                    <span></span><span></span><span></span><span></span><span></span>
-                </div>
+                <div class="signal-bars" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
             </div>
 
             <canvas id="spectrum" width="1200" height="170"></canvas>
 
             <div class="track-meta">
-                <span id="identifyState">Identificação automática preparada</span>
+                <span id="identifyState">Equalizador real preparado</span>
                 <span class="gold-separator"></span>
-                <span>Qualidade AAC</span>
+                <span id="spectrumState">Spectrum: à espera do áudio</span>
             </div>
         </section>
 
         <section class="content-grid">
             <article class="panel">
                 <div class="panel-header">
-                    <div>
-                        <p class="section-kicker">MEMÓRIAS RECENTES</p>
-                        <h3>Histórico</h3>
-                    </div>
+                    <div><p class="section-kicker">MEMÓRIAS RECENTES</p><h3>Histórico</h3></div>
                     <span class="panel-number">10</span>
                 </div>
-                <div id="historyList" class="track-list empty-state">
-                    Ainda não existem músicas identificadas.
-                </div>
+                <div id="historyList" class="track-list empty-state">Ainda não existem músicas identificadas.</div>
             </article>
 
             <article class="panel">
                 <div class="panel-header">
-                    <div>
-                        <p class="section-kicker">AS MAIS TOCADAS</p>
-                        <h3>Top 10</h3>
-                    </div>
+                    <div><p class="section-kicker">AS MAIS TOCADAS</p><h3>Top 10</h3></div>
                     <span class="panel-number">★</span>
                 </div>
-                <div id="topList" class="track-list empty-state">
-                    O Top 10 será criado à medida que ouvires a rádio.
-                </div>
+                <div id="topList" class="track-list empty-state">O Top 10 será criado à medida que ouvires a rádio.</div>
             </article>
         </section>
     </main>
 
     <footer class="player-dock">
         <div class="dock-track">
-            <img id="dockCover"
-                 src="{{ url_for('static', filename='default_cover.svg') }}"
-                 alt="">
-            <div class="dock-copy">
-                <strong id="dockTitle">M80 Ballads</strong>
-                <span id="dockArtist">Rádio Neon Gold</span>
-            </div>
+            <img id="dockCover" src="{{ url_for('static', filename='default_cover.svg') }}" alt="">
+            <div class="dock-copy"><strong id="dockTitle">M80 Ballads</strong><span id="dockArtist">Rádio Neon Gold</span></div>
         </div>
-
         <div class="dock-controls">
-            <button id="dockPlayButton" class="round-play" type="button" aria-label="Reproduzir">
-                <span id="dockPlayIcon">▶</span>
-            </button>
+            <button id="dockPlayButton" class="round-play" type="button" aria-label="Reproduzir"><span id="dockPlayIcon">▶</span></button>
         </div>
-
         <div class="dock-volume">
             <span>VOL</span>
             <input id="volumeControl" type="range" min="0" max="100" value="80">
             <button id="muteButton" class="mute-button" type="button" aria-label="Silenciar">🔊</button>
         </div>
-
-        <div class="progress-glow">
-            <span id="progressGlow"></span>
-        </div>
+        <div class="progress-glow"><span id="progressGlow"></span></div>
     </footer>
 
     <audio id="radioAudio" preload="none">
