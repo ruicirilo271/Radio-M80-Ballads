@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900">
+  <defs>
+    <radialGradient id="bg" cx="38%" cy="28%" r="80%">
+      <stop offset="0" stop-color="#4a2f11"/>
+      <stop offset=".48" stop-color="#171008"/>
+      <stop offset="1" stop-color="#050403"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff3b2"/>
+      <stop offset=".45" stop-color="#e9ad3d"/>
+      <stop offset="1" stop-color="#87520f"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="16" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="900" height="900" fill="url(#bg)"/>
+  <circle cx="450" cy="450" r="320" fill="none" stroke="#f3bd52" stroke-opacity=".13" stroke-width="2"/>
+  <circle cx="450" cy="450" r="260" fill="none" stroke="#f3bd52" stroke-opacity=".08" stroke-width="2" stroke-dasharray="8 18"/>
+  <circle cx="450" cy="450" r="210" fill="#0c0906" stroke="url(#gold)" stroke-width="7"/>
+  <circle cx="450" cy="450" r="155" fill="none" stroke="#f7d57b" stroke-opacity=".15" stroke-width="2"/>
+  <circle cx="450" cy="450" r="100" fill="url(#gold)" filter="url(#glow)" opacity=".95"/>
+  <circle cx="450" cy="450" r="15" fill="#120c05"/>
+  <text x="450" y="430" text-anchor="middle" fill="url(#gold)" font-family="Georgia, serif" font-size="128" font-weight="700">M80</text>
+  <text x="450" y="520" text-anchor="middle" fill="#f9df9a" font-family="Arial, sans-serif" font-size="38" font-weight="700" letter-spacing="18">BALLADS</text>
+  <text x="450" y="690" text-anchor="middle" fill="#9f824d" font-family="Arial, sans-serif" font-size="19" letter-spacing="9">RÁDIO NEON GOLD</text>
+</svg>
