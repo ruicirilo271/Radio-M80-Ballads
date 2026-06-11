@@ -299,12 +299,12 @@ async function identifyTrack(silent = false) {
     if (identifyButton.disabled) return;
 
     identifyButton.disabled = true;
-    identifyState.textContent = "A gravar uma amostra e identificar…";
+    identifyState.textContent = "A gravar 12 segundos em MP3 de alta qualidade…";
     if (!silent) identifyButton.innerHTML = "<span>◌</span> A identificar…";
 
     try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 48000);
+        const timeout = setTimeout(() => controller.abort(), 42000);
         const response = await fetch("/api/identify", {
             method: "POST",
             signal: controller.signal,
@@ -343,6 +343,16 @@ async function identifyTrack(silent = false) {
     } finally {
         identifyButton.disabled = false;
         identifyButton.innerHTML = "<span>✦</span> Identificar agora";
+    }
+}
+
+async function warmupIdentification() {
+    try {
+        await fetch(`/api/warmup?nocache=${Date.now()}`, {
+            cache: "no-store",
+        });
+    } catch (error) {
+        console.debug("Aquecimento da identificação indisponível:", error);
     }
 }
 
@@ -616,3 +626,6 @@ window.addEventListener("beforeunload", () => {
 resizeCanvas();
 drawSpectrum();
 renderAll();
+
+
+warmupIdentification();

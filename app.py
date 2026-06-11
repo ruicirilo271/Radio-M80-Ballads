@@ -24,10 +24,10 @@ STREAM_URL = os.getenv(
 DEFAULT_COVER = "/static/default_cover.svg"
 
 # Uma amostra MP3 pequena reduz escrita no /tmp e o trabalho enviado ao Shazam.
-PRIMARY_CAPTURE_SECONDS = 8
-RETRY_CAPTURE_SECONDS = 7
-MP3_BITRATE = "96k"
-MIN_MP3_BYTES = 32_000
+CAPTURE_SECONDS = 12
+SHAZAM_SEGMENT_SECONDS = 10
+MP3_BITRATE = "128k"
+MIN_MP3_BYTES = 80_000
 
 STREAM_HEADERS = {
     "User-Agent": (
@@ -104,8 +104,10 @@ def normalize_track(track: Any) -> dict[str, Any] | None:
         or images.get("background")
     )
 
+    # A resposta do Shazam não fica bloqueada por uma segunda API.
+    # Quando não existe capa no resultado, o frontend usa a capa padrão.
     if not cover:
-        cover = itunes_cover(artist, title)
+        cover = DEFAULT_COVER
 
     now = int(time.time())
     return {
@@ -148,7 +150,7 @@ def build_capture_command(output_file: Path, seconds: int) -> list[str]:
         # Limpeza leve; evita o filtro loudnorm, que é mais pesado em serverless.
         "-af", "highpass=f=70,lowpass=f=15000,volume=1.35",
         "-ac", "1",
-        "-ar", "32000",
+        "-ar", "44100",
 
         # MP3 pequeno e compatível com o recognizer do ShazamIO.
         "-c:a", "libmp3lame",
@@ -163,73 +165,66 @@ def build_capture_command(output_file: Path, seconds: int) -> list[str]:
 
 def capture_stream_mp3(output_file: Path) -> dict[str, Any]:
     """
-    Grava a emissão em MP3 no /tmp.
+    Grava uma única amostra MP3 de alta qualidade em /tmp.
 
-    A segunda tentativa é ligeiramente mais curta para manter margem suficiente
-    para o pedido ao Shazam dentro do tempo da Function.
+    Não faz uma segunda gravação automática. Assim, o utilizador não fica
+    à espera de duas amostras consecutivas quando o Shazam não encontra
+    correspondência ou quando existe uma falha momentânea do stream.
     """
-    attempts = [
-        (1, PRIMARY_CAPTURE_SECONDS, 15),
-        (2, RETRY_CAPTURE_SECONDS, 14),
-    ]
-    errors: list[str] = []
+    output_file.unlink(missing_ok=True)
+    command = build_capture_command(output_file, CAPTURE_SECONDS)
 
-    for attempt, seconds, timeout_seconds in attempts:
-        output_file.unlink(missing_ok=True)
-        command = build_capture_command(output_file, seconds)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        size = output_file.stat().st_size if output_file.exists() else 0
 
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+        if size >= MIN_MP3_BYTES:
+            return {
+                "format": "mp3",
+                "bitrate": MP3_BITRATE,
+                "sample_rate": 44100,
+                "bytes": size,
+                "attempt": 1,
+                "seconds": CAPTURE_SECONDS,
+                "ffmpeg_returncode": "timeout-com-amostra-valida",
+            }
 
-            size = output_file.stat().st_size if output_file.exists() else 0
+        raise RuntimeError(
+            "A captura MP3 excedeu o tempo disponível e não produziu "
+            f"áudio suficiente ({size} bytes)."
+        )
 
-            # Alguns servidores fecham a ligação no final e o FFmpeg pode devolver
-            # código não-zero apesar de já existir áudio suficiente.
-            if size >= MIN_MP3_BYTES:
-                return {
-                    "format": "mp3",
-                    "bytes": size,
-                    "attempt": attempt,
-                    "seconds": seconds,
-                    "ffmpeg_returncode": result.returncode,
-                }
+    size = output_file.stat().st_size if output_file.exists() else 0
 
-            detail = (
-                result.stderr
-                or result.stdout
-                or "O stream não enviou áudio MP3 suficiente."
-            ).strip()
-            errors.append(f"tentativa {attempt}: {detail[-500:]}")
+    # O servidor pode fechar a ligação no fim da amostra e o FFmpeg devolver
+    # código diferente de zero, embora o MP3 já esteja completo.
+    if size >= MIN_MP3_BYTES:
+        return {
+            "format": "mp3",
+            "bitrate": MP3_BITRATE,
+            "sample_rate": 44100,
+            "bytes": size,
+            "attempt": 1,
+            "seconds": CAPTURE_SECONDS,
+            "ffmpeg_returncode": result.returncode,
+        }
 
-        except subprocess.TimeoutExpired:
-            size = output_file.stat().st_size if output_file.exists() else 0
-            if size >= MIN_MP3_BYTES:
-                return {
-                    "format": "mp3",
-                    "bytes": size,
-                    "attempt": attempt,
-                    "seconds": seconds,
-                    "ffmpeg_returncode": "timeout-com-amostra-valida",
-                }
-            errors.append(
-                f"tentativa {attempt}: captura excedeu {timeout_seconds}s "
-                f"e produziu apenas {size} bytes"
-            )
-        except Exception as exc:
-            errors.append(f"tentativa {attempt}: {type(exc).__name__}: {exc}")
-
-        if attempt == 1:
-            time.sleep(0.7)
+    detail = (
+        result.stderr
+        or result.stdout
+        or "O stream não enviou áudio MP3 suficiente."
+    ).strip()
 
     raise RuntimeError(
-        "Não foi possível criar a amostra MP3 da M80. " + " | ".join(errors)
+        "Não foi possível criar uma amostra MP3 válida da M80. "
+        f"Tamanho: {size} bytes. Detalhe: {detail[-600:]}"
     )
-
 
 async def recognize_mp3(audio_file: Path) -> dict[str, Any] | None:
     """
@@ -243,19 +238,19 @@ async def recognize_mp3(audio_file: Path) -> dict[str, Any] | None:
         raise RuntimeError("A amostra MP3 ficou demasiado pequena para identificar.")
 
     retry_options = ExponentialRetry(
-        attempts=3,
-        max_timeout=4,
+        attempts=2,
+        max_timeout=2,
         statuses={429, 500, 502, 503, 504},
     )
     http_client = HTTPClient(retry_options=retry_options)
     shazam = Shazam(
         http_client=http_client,
-        segment_duration_seconds=8,
+        segment_duration_seconds=SHAZAM_SEGMENT_SECONDS,
     )
 
     result = await asyncio.wait_for(
         shazam.recognize(audio_bytes),
-        timeout=15,
+        timeout=14,
     )
 
     track = result.get("track") if isinstance(result, dict) else None
@@ -460,9 +455,33 @@ def identify_diagnostics():
         "ffmpeg_path": binary,
         "mp3_encoder": ffmpeg_supports_mp3(),
         "sample_format": "mp3",
-        "capture_seconds": PRIMARY_CAPTURE_SECONDS,
+        "capture_seconds": CAPTURE_SECONDS,
+        "shazam_segment_seconds": SHAZAM_SEGMENT_SECONDS,
+        "mp3_bitrate": MP3_BITRATE,
+        "sample_rate": 44100,
         "minimum_sample_bytes": MIN_MP3_BYTES,
     })
+
+
+@app.route("/api/warmup")
+def warmup():
+    """Inicializa o caminho do FFmpeg sem gravar áudio."""
+    started = time.perf_counter()
+
+    try:
+        binary = ffmpeg_path()
+        available = bool(binary and Path(binary).exists())
+        return jsonify({
+            "ok": available,
+            "ffmpeg_available": available,
+            "elapsed": round(time.perf_counter() - started, 3),
+        })
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "elapsed": round(time.perf_counter() - started, 3),
+        }), 503
 
 
 @app.route("/health")
@@ -486,7 +505,10 @@ def health():
         "identification_sample": "mp3",
         "ffmpeg_available": ffmpeg_available,
         "ffmpeg_path": binary,
-        "capture_seconds": PRIMARY_CAPTURE_SECONDS,
+        "capture_seconds": CAPTURE_SECONDS,
+        "shazam_segment_seconds": SHAZAM_SEGMENT_SECONDS,
+        "mp3_bitrate": MP3_BITRATE,
+        "sample_rate": 44100,
         "tmp_directory": tempfile.gettempdir(),
         "storage": "browser-localStorage",
     })

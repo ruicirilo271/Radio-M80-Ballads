@@ -1,30 +1,33 @@
-# M80 Ballads — Vercel com identificação MP3
+# M80 Ballads — identificação MP3 de alta qualidade
 
-Esta versão mantém:
+Esta versão foi ajustada para melhorar o reconhecimento sem duplicar o tempo
+de espera na Vercel.
 
-- rádio principal ligada diretamente ao stream oficial;
-- spectrum real através de um segundo áudio silencioso;
-- renovação automática do spectrum;
-- identificação pelo Shazam;
-- histórico e Top 10 no `localStorage`;
-- visual dourado Super Modo Deus.
+## Configuração da amostra
 
-## Alteração principal da identificação
+- Formato: MP3
+- Duração capturada: 12 segundos
+- Bitrate: 128 kbps
+- Frequência: 44,1 kHz
+- Canais: mono
+- Segmento analisado pelo Shazam: 10 segundos centrais
+- Tentativas de gravação por clique: 1
 
-A Function grava uma amostra MP3 de 8 segundos em `/tmp`, lê o ficheiro para
-memória e envia os bytes ao ShazamIO. O ficheiro é sempre apagado no final.
+A aplicação não grava automaticamente uma segunda amostra. Caso o Shazam não
+encontre correspondência, o utilizador pode tentar novamente alguns segundos
+mais tarde. Isto evita esperas próximas de 30 ou 40 segundos.
 
-Também foi incluído:
+## Otimizações
 
-- `vercel.json` apenas com `"fluid": true`;
-- `.python-version` com Python 3.12;
-- diagnóstico detalhado por fase;
-- cliente Shazam com poucas tentativas e timeout controlado;
-- segunda captura curta apenas quando a primeira falha.
+- O resultado não fica à espera de uma pesquisa adicional no iTunes.
+- O Shazam faz no máximo duas tentativas de rede curtas.
+- `/api/warmup` é chamado silenciosamente ao abrir a página para reduzir o
+  impacto do primeiro arranque da Function.
+- O ficheiro MP3 é guardado em `/tmp` e apagado no bloco `finally`.
+- A rádio principal continua ligada diretamente ao stream oficial.
+- O spectrum continua a usar a ligação silenciosa separada.
 
-## Estrutura obrigatória no GitHub
-
-Todos estes elementos devem ficar na raiz:
+## Estrutura na raiz do GitHub
 
 ```text
 app.py
@@ -36,52 +39,29 @@ templates/
 static/
 ```
 
-## Vercel
-
-O `vercel.json` desta versão não contém `functions.app.py`, portanto não provoca
-o erro de padrão que não encontra Functions na pasta `api`.
-
-Depois do deploy, abre:
-
-```text
-/health
-/api/stream-check
-/api/identify-diagnostics
-```
-
-Em `/api/identify-diagnostics`, os campos importantes devem ser:
-
-```json
-{
-  "ok": true,
-  "tmp_writable": true,
-  "ffmpeg_available": true,
-  "mp3_encoder": true,
-  "sample_format": "mp3"
-}
-```
-
-No painel da Vercel, confirma também:
-
-```text
-Project → Settings → Functions → Function Max Duration
-```
-
-Define o máximo para 60 segundos e faz um novo deployment. Em projetos com
-Fluid Compute ativo, a plataforma poderá aplicar limites superiores, mas a
-identificação foi desenhada para terminar muito antes disso.
-
-## Teste local
-
-```powershell
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
-```
+## Diagnóstico depois do deploy
 
 Abre:
 
 ```text
-http://127.0.0.1:5000
+/api/identify-diagnostics
 ```
+
+Deverás encontrar:
+
+```json
+{
+  "ok": true,
+  "sample_format": "mp3",
+  "capture_seconds": 12,
+  "shazam_segment_seconds": 10,
+  "mp3_bitrate": "128k",
+  "sample_rate": 44100,
+  "tmp_writable": true,
+  "ffmpeg_available": true,
+  "mp3_encoder": true
+}
+```
+
+Uma identificação bem-sucedida deverá demorar normalmente pelo menos o tempo
+da própria gravação da emissão ao vivo, mais o pedido ao Shazam.
