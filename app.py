@@ -3,12 +3,16 @@ import os
 import subprocess
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import requests
+from aiohttp_retry import ExponentialRetry
 from flask import Flask, Response, jsonify, render_template, stream_with_context
 from imageio_ffmpeg import get_ffmpeg_exe
 from shazamio import Shazam
+from shazamio.client import HTTPClient
 
 app = Flask(__name__)
 
@@ -18,8 +22,12 @@ STREAM_URL = os.getenv(
     "https://stream-icy.bauermedia.pt/m80ballads.aac",
 )
 DEFAULT_COVER = "/static/default_cover.svg"
-CAPTURE_SECONDS = 11
-MIN_AUDIO_BYTES = 120_000
+
+# Uma amostra MP3 pequena reduz escrita no /tmp e o trabalho enviado ao Shazam.
+PRIMARY_CAPTURE_SECONDS = 8
+RETRY_CAPTURE_SECONDS = 7
+MP3_BITRATE = "96k"
+MIN_MP3_BYTES = 32_000
 
 STREAM_HEADERS = {
     "User-Agent": (
@@ -34,7 +42,23 @@ STREAM_HEADERS = {
 
 
 def ffmpeg_path() -> str:
+    """Binário FFmpeg incluído no pacote imageio-ffmpeg."""
     return get_ffmpeg_exe()
+
+
+@lru_cache(maxsize=1)
+def ffmpeg_supports_mp3() -> bool:
+    try:
+        result = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        return "libmp3lame" in output
+    except Exception:
+        return False
 
 
 def itunes_cover(artist: str, title: str) -> str:
@@ -44,20 +68,24 @@ def itunes_cover(artist: str, title: str) -> str:
             params={
                 "term": f"{artist} {title}",
                 "entity": "song",
-                "limit": 5,
+                "limit": 3,
                 "country": "PT",
             },
-            timeout=5,
+            timeout=2.5,
         )
         response.raise_for_status()
         results = response.json().get("results", [])
         artwork = results[0].get("artworkUrl100") if results else None
-        return artwork.replace("100x100bb", "600x600bb") if artwork else DEFAULT_COVER
+        return (
+            artwork.replace("100x100bb", "600x600bb")
+            if artwork
+            else DEFAULT_COVER
+        )
     except Exception:
         return DEFAULT_COVER
 
 
-def normalize_track(track):
+def normalize_track(track: Any) -> dict[str, Any] | None:
     if not isinstance(track, dict):
         return None
 
@@ -74,8 +102,10 @@ def normalize_track(track):
         images.get("coverarthq")
         or images.get("coverart")
         or images.get("background")
-        or itunes_cover(artist, title)
     )
+
+    if not cover:
+        cover = itunes_cover(artist, title)
 
     now = int(time.time())
     return {
@@ -87,71 +117,155 @@ def normalize_track(track):
     }
 
 
-def capture_stream(output_file: Path) -> None:
-    """Grava uma amostra curta com uma repetição rápida em falhas temporárias."""
-    errors = []
-
-    command = [
+def build_capture_command(output_file: Path, seconds: int) -> list[str]:
+    return [
         ffmpeg_path(),
         "-hide_banner",
         "-loglevel", "error",
+        "-nostdin",
         "-y",
+
+        # Cabeçalhos usados pelo servidor ICY da Bauer.
         "-user_agent", STREAM_HEADERS["User-Agent"],
         "-headers",
         "Accept: audio/aac,audio/*;q=0.9,*/*;q=0.8\r\n"
         "Icy-MetaData: 0\r\n"
-        "Accept-Encoding: identity\r\n",
-        "-rw_timeout", "7000000",
+        "Accept-Encoding: identity\r\n"
+        "Connection: close\r\n",
+
+        # Reconexão em falhas temporárias 4XX/5XX.
+        "-rw_timeout", "6500000",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
         "-reconnect_on_http_error", "4xx,5xx",
         "-reconnect_delay_max", "2",
+
         "-i", STREAM_URL,
-        "-t", str(CAPTURE_SECONDS),
+        "-t", str(seconds),
         "-vn",
-        "-af", "highpass=f=70,lowpass=f=15500,volume=1.4",
+
+        # Limpeza leve; evita o filtro loudnorm, que é mais pesado em serverless.
+        "-af", "highpass=f=70,lowpass=f=15000,volume=1.35",
         "-ac", "1",
-        "-ar", "44100",
-        "-c:a", "pcm_s16le",
+        "-ar", "32000",
+
+        # MP3 pequeno e compatível com o recognizer do ShazamIO.
+        "-c:a", "libmp3lame",
+        "-b:a", MP3_BITRATE,
+        "-map_metadata", "-1",
+        "-id3v2_version", "0",
+        "-write_xing", "0",
+        "-f", "mp3",
         str(output_file),
     ]
 
-    for attempt in range(1, 3):
+
+def capture_stream_mp3(output_file: Path) -> dict[str, Any]:
+    """
+    Grava a emissão em MP3 no /tmp.
+
+    A segunda tentativa é ligeiramente mais curta para manter margem suficiente
+    para o pedido ao Shazam dentro do tempo da Function.
+    """
+    attempts = [
+        (1, PRIMARY_CAPTURE_SECONDS, 15),
+        (2, RETRY_CAPTURE_SECONDS, 14),
+    ]
+    errors: list[str] = []
+
+    for attempt, seconds, timeout_seconds in attempts:
+        output_file.unlink(missing_ok=True)
+        command = build_capture_command(output_file, seconds)
+
         try:
-            output_file.unlink(missing_ok=True)
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=18,
+                timeout=timeout_seconds,
             )
 
-            if output_file.exists() and output_file.stat().st_size >= MIN_AUDIO_BYTES:
-                return
+            size = output_file.stat().st_size if output_file.exists() else 0
 
-            detail = (result.stderr or "O stream não enviou áudio suficiente.").strip()
-            errors.append(f"tentativa {attempt}: {detail[-350:]}")
+            # Alguns servidores fecham a ligação no final e o FFmpeg pode devolver
+            # código não-zero apesar de já existir áudio suficiente.
+            if size >= MIN_MP3_BYTES:
+                return {
+                    "format": "mp3",
+                    "bytes": size,
+                    "attempt": attempt,
+                    "seconds": seconds,
+                    "ffmpeg_returncode": result.returncode,
+                }
+
+            detail = (
+                result.stderr
+                or result.stdout
+                or "O stream não enviou áudio MP3 suficiente."
+            ).strip()
+            errors.append(f"tentativa {attempt}: {detail[-500:]}")
+
         except subprocess.TimeoutExpired:
-            if output_file.exists() and output_file.stat().st_size >= MIN_AUDIO_BYTES:
-                return
-            errors.append(f"tentativa {attempt}: tempo limite da captura")
+            size = output_file.stat().st_size if output_file.exists() else 0
+            if size >= MIN_MP3_BYTES:
+                return {
+                    "format": "mp3",
+                    "bytes": size,
+                    "attempt": attempt,
+                    "seconds": seconds,
+                    "ffmpeg_returncode": "timeout-com-amostra-valida",
+                }
+            errors.append(
+                f"tentativa {attempt}: captura excedeu {timeout_seconds}s "
+                f"e produziu apenas {size} bytes"
+            )
         except Exception as exc:
-            errors.append(f"tentativa {attempt}: {exc}")
+            errors.append(f"tentativa {attempt}: {type(exc).__name__}: {exc}")
 
         if attempt == 1:
-            time.sleep(1)
+            time.sleep(0.7)
 
     raise RuntimeError(
-        "O servidor da M80 não forneceu uma amostra válida. " + " | ".join(errors)
+        "Não foi possível criar a amostra MP3 da M80. " + " | ".join(errors)
     )
 
 
-async def recognize_file(audio_file: Path):
-    shazam = Shazam()
-    result = await asyncio.wait_for(shazam.recognize(str(audio_file)), timeout=16)
+async def recognize_mp3(audio_file: Path) -> dict[str, Any] | None:
+    """
+    Lê o MP3 para memória e entrega bytes ao ShazamIO.
+
+    O cliente do ShazamIO é limitado a poucas tentativas para não ficar preso
+    durante demasiado tempo numa Function serverless.
+    """
+    audio_bytes = audio_file.read_bytes()
+    if len(audio_bytes) < MIN_MP3_BYTES:
+        raise RuntimeError("A amostra MP3 ficou demasiado pequena para identificar.")
+
+    retry_options = ExponentialRetry(
+        attempts=3,
+        max_timeout=4,
+        statuses={429, 500, 502, 503, 504},
+    )
+    http_client = HTTPClient(retry_options=retry_options)
+    shazam = Shazam(
+        http_client=http_client,
+        segment_duration_seconds=8,
+    )
+
+    result = await asyncio.wait_for(
+        shazam.recognize(audio_bytes),
+        timeout=15,
+    )
+
     track = result.get("track") if isinstance(result, dict) else None
     return normalize_track(track)
+
+
+@app.after_request
+def no_cache_api(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
 @app.route("/")
@@ -167,7 +281,12 @@ def index():
 @app.route("/radio-stream")
 @app.route("/radio-spectrum-stream")
 def radio_stream():
-    """Proxy de áudio do mesmo domínio para permitir Web Audio/AnalyserNode."""
+    """
+    Proxy apenas para o spectrum real.
+
+    O áudio audível continua a usar diretamente o stream oficial no JavaScript,
+    evitando que a rádio pare quando a Function de streaming terminar.
+    """
     try:
         upstream = requests.get(
             STREAM_URL,
@@ -205,6 +324,7 @@ def radio_stream():
             },
             direct_passthrough=True,
         )
+
     except Exception as exc:
         return jsonify({
             "ok": False,
@@ -214,34 +334,64 @@ def radio_stream():
 
 @app.route("/api/identify", methods=["POST"])
 def identify():
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+    stage = "preparar"
     stamp = f"{os.getpid()}_{int(time.time() * 1000)}"
-    audio_file = Path(tempfile.gettempdir()) / f"m80_{stamp}.wav"
+    audio_file = Path(tempfile.gettempdir()) / f"m80_{stamp}.mp3"
 
     try:
-        capture_stream(audio_file)
-        track = asyncio.run(recognize_file(audio_file))
+        stage = "capturar_mp3"
+        phase = time.perf_counter()
+        sample = capture_stream_mp3(audio_file)
+        timings["capture"] = round(time.perf_counter() - phase, 3)
+
+        stage = "shazam"
+        phase = time.perf_counter()
+        track = asyncio.run(recognize_mp3(audio_file))
+        timings["shazam"] = round(time.perf_counter() - phase, 3)
+        timings["total"] = round(time.perf_counter() - started, 3)
 
         if not track:
             return jsonify({
                 "ok": False,
                 "track": None,
-                "error": "O Shazam não reconheceu esta parte da emissão. Tenta novamente dentro de alguns segundos.",
+                "stage": "shazam_sem_correspondencia",
+                "sample": sample,
+                "timings": timings,
+                "error": (
+                    "O Shazam recebeu a amostra MP3, mas não reconheceu esta "
+                    "parte da emissão. Tenta novamente dentro de alguns segundos."
+                ),
             }), 422
 
-        return jsonify({"ok": True, "track": track})
+        return jsonify({
+            "ok": True,
+            "track": track,
+            "sample": sample,
+            "timings": timings,
+        })
 
     except asyncio.TimeoutError:
+        timings["total"] = round(time.perf_counter() - started, 3)
         return jsonify({
             "ok": False,
             "track": None,
-            "error": "O Shazam demorou demasiado tempo a responder.",
+            "stage": stage,
+            "timings": timings,
+            "error": "O pedido ao Shazam excedeu o tempo disponível.",
         }), 504
+
     except Exception as exc:
+        timings["total"] = round(time.perf_counter() - started, 3)
         return jsonify({
             "ok": False,
             "track": None,
-            "error": str(exc) or "Erro desconhecido durante a identificação.",
+            "stage": stage,
+            "timings": timings,
+            "error": f"{type(exc).__name__}: {exc}",
         }), 503
+
     finally:
         try:
             audio_file.unlink(missing_ok=True)
@@ -275,6 +425,46 @@ def stream_check():
             response.close()
 
 
+@app.route("/api/identify-diagnostics")
+def identify_diagnostics():
+    temp_test = Path(tempfile.gettempdir()) / f"m80_tmp_test_{os.getpid()}.txt"
+    tmp_writable = False
+    tmp_error = None
+
+    try:
+        temp_test.write_text("ok", encoding="utf-8")
+        tmp_writable = temp_test.read_text(encoding="utf-8") == "ok"
+    except Exception as exc:
+        tmp_error = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            temp_test.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    try:
+        binary = ffmpeg_path()
+        ffmpeg_available = bool(binary and Path(binary).exists())
+    except Exception as exc:
+        binary = None
+        ffmpeg_available = False
+        tmp_error = tmp_error or f"FFmpeg: {type(exc).__name__}: {exc}"
+
+    return jsonify({
+        "ok": ffmpeg_available and tmp_writable and ffmpeg_supports_mp3(),
+        "platform": "vercel" if os.getenv("VERCEL") else "local",
+        "tmp_directory": tempfile.gettempdir(),
+        "tmp_writable": tmp_writable,
+        "tmp_error": tmp_error,
+        "ffmpeg_available": ffmpeg_available,
+        "ffmpeg_path": binary,
+        "mp3_encoder": ffmpeg_supports_mp3(),
+        "sample_format": "mp3",
+        "capture_seconds": PRIMARY_CAPTURE_SECONDS,
+        "minimum_sample_bytes": MIN_MP3_BYTES,
+    })
+
+
 @app.route("/health")
 def health():
     try:
@@ -293,12 +483,19 @@ def health():
         "spectrum_source": "/radio-spectrum-stream",
         "real_spectrum": True,
         "automatic_spectrum_reconnect": True,
+        "identification_sample": "mp3",
         "ffmpeg_available": ffmpeg_available,
         "ffmpeg_path": binary,
-        "capture_seconds": CAPTURE_SECONDS,
+        "capture_seconds": PRIMARY_CAPTURE_SECONDS,
+        "tmp_directory": tempfile.gettempdir(),
         "storage": "browser-localStorage",
     })
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True,
+        threaded=True,
+    )

@@ -1,29 +1,75 @@
-# M80 Ballads — Super Deus Estável (Vercel)
+# M80 Ballads — Vercel com identificação MP3
 
-Esta versão resolve o desligamento ao fim de alguns minutos na Vercel.
+Esta versão mantém:
 
-## Arquitetura
+- rádio principal ligada diretamente ao stream oficial;
+- spectrum real através de um segundo áudio silencioso;
+- renovação automática do spectrum;
+- identificação pelo Shazam;
+- histórico e Top 10 no `localStorage`;
+- visual dourado Super Modo Deus.
 
-- O áudio que o utilizador ouve toca diretamente do stream oficial da M80.
-- O spectrum usa um segundo áudio silencioso através de `/radio-spectrum-stream`.
-- Quando a Vercel termina a Function de streaming, apenas o spectrum é renovado.
-- A rádio principal continua a tocar sem interrupção.
-- O áudio principal também tem recuperação automática para falhas reais do servidor.
-- Identificação Shazam, capas, histórico e Top 10 continuam ativos.
+## Alteração principal da identificação
 
-## Publicação
+A Function grava uma amostra MP3 de 8 segundos em `/tmp`, lê o ficheiro para
+memória e envia os bytes ao ShazamIO. O ficheiro é sempre apagado no final.
 
-Coloca na raiz do repositório:
+Também foi incluído:
+
+- `vercel.json` apenas com `"fluid": true`;
+- `.python-version` com Python 3.12;
+- diagnóstico detalhado por fase;
+- cliente Shazam com poucas tentativas e timeout controlado;
+- segunda captura curta apenas quando a primeira falha.
+
+## Estrutura obrigatória no GitHub
+
+Todos estes elementos devem ficar na raiz:
 
 ```text
 app.py
 requirements.txt
+vercel.json
+.python-version
 README.md
 templates/
 static/
 ```
 
-Não uses `vercel.json` neste projeto, porque a deteção automática do `app.py` já funcionou no deploy anterior.
+## Vercel
+
+O `vercel.json` desta versão não contém `functions.app.py`, portanto não provoca
+o erro de padrão que não encontra Functions na pasta `api`.
+
+Depois do deploy, abre:
+
+```text
+/health
+/api/stream-check
+/api/identify-diagnostics
+```
+
+Em `/api/identify-diagnostics`, os campos importantes devem ser:
+
+```json
+{
+  "ok": true,
+  "tmp_writable": true,
+  "ffmpeg_available": true,
+  "mp3_encoder": true,
+  "sample_format": "mp3"
+}
+```
+
+No painel da Vercel, confirma também:
+
+```text
+Project → Settings → Functions → Function Max Duration
+```
+
+Define o máximo para 60 segundos e faz um novo deployment. Em projetos com
+Fluid Compute ativo, a plataforma poderá aplicar limites superiores, mas a
+identificação foi desenhada para terminar muito antes disso.
 
 ## Teste local
 
@@ -34,9 +80,8 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Abre `http://127.0.0.1:5000`.
+Abre:
 
-## Diagnóstico
-
-- `/health`
-- `/api/stream-check`
+```text
+http://127.0.0.1:5000
+```

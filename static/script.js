@@ -311,13 +311,30 @@ async function identifyTrack(silent = false) {
         });
         clearTimeout(timeout);
 
-        const data = await response.json();
+        const contentType = response.headers.get("content-type") || "";
+        let data;
+
+        if (contentType.includes("application/json")) {
+            data = await response.json();
+        } else {
+            const body = await response.text();
+            throw new Error(
+                `A Vercel terminou a identificação sem devolver JSON (${response.status}). ` +
+                body.slice(0, 180)
+            );
+        }
+
         if (!response.ok || !data.track) {
-            throw new Error(data.error || "A música não foi reconhecida.");
+            const stage = data.stage ? ` [fase: ${data.stage}]` : "";
+            const total = data.timings?.total ? ` (${data.timings.total}s)` : "";
+            throw new Error(
+                `${data.error || "A música não foi reconhecida."}${stage}${total}`
+            );
         }
 
         addIdentifiedTrack(data.track);
-        identifyState.textContent = "Música identificada pelo Shazam";
+        const total = data.timings?.total ? ` em ${data.timings.total}s` : "";
+        identifyState.textContent = `Música identificada pelo Shazam${total}`;
     } catch (error) {
         if (!silent) identifyState.textContent = error.name === "AbortError"
             ? "A identificação excedeu o tempo disponível."
